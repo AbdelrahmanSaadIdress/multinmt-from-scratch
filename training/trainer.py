@@ -405,7 +405,7 @@ class Trainer:
                 loss = self._train_step(batch)
                 epoch_loss += loss
                 epoch_tokens += batch["src"].numel() + batch["tgt_in"].numel()
-
+                print(loss)
                 # ---- Optimizer step (every grad_accum micro-batches) ----
                 micro_step = (step_in_epoch + 1)
                 if micro_step % self.grad_accum == 0:
