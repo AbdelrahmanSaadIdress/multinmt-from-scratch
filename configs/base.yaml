@@ -37,29 +37,29 @@ Data:
     - <fr>
 
   # Train/val/test split ratios
-  train_ratio: 0.8
-  val_ratio:   0.4
-  test_ratio:  0.4
+  train_ratio: 0.7
+  val_ratio:   0.2
+  test_ratio:  0.1
 
   max_seq_length: 150          # sentences longer than this are filtered out
   min_seq_length:   3          # filter near-empty sentences
 
   # Cap on examples per (language pair x split). null = load everything.
   # Override at CLI: python main.py Data.max_examples=1000
-  max_examples: None
+  max_examples: 200000         #100 000  #500 000    #1 000 000
 
 # ---------------------------------------------------------------------------
 # Modelling  (paper Table 3, "base" column)
 # ---------------------------------------------------------------------------
 Modelling:
-  src_vocab_size: 32000        # must match Data.vocab_size after SP training
-  tgt_vocab_size: 32000        # shared vocab → same value
-  d_model:        512          # embedding / hidden dimension
-  num_heads:        8          # attention heads  (d_model / num_heads = 64 = d_k)
-  num_layers:       6          # encoder layers = decoder layers
-  d_ff:          2048          # position-wise FFN inner dimension (paper: 4 * d_model)
-  max_seq_length:  150         # must match Data.max_seq_length
-  dropout:         0.1         # applied to embeddings + sub-layer outputs (Section 5.4)
+  src_vocab_size: 16000         # must match Data.vocab_size after SP training
+  tgt_vocab_size: 16000         # shared vocab → same value
+  d_model:        256           # embedding / hidden dimension
+  num_heads:        4           # attention heads  (d_model / num_heads = 64 = d_k)
+  num_layers:       4           # encoder layers = decoder layers
+  d_ff:          1024           # position-wise FFN inner dimension (paper: 4 * d_model)
+  max_seq_length:  150          # must match Data.max_seq_length
+  dropout:         0.15         # applied to embeddings + sub-layer outputs (Section 5.4)
 
 # ---------------------------------------------------------------------------
 # Training  (paper Section 5.3 — Optimizer)
@@ -72,7 +72,7 @@ Training:
 
   # Warmup LR schedule — paper equation 3
   # lrate = d_model^{-0.5} · min(step^{-0.5}, step · warmup_steps^{-1.5})
-  warmup_steps:  4000
+  warmup_steps:  2000
 
   # Regularisation (Section 5.4)
   label_smoothing: 0.1         # ε_ls = 0.1
@@ -80,10 +80,10 @@ Training:
 
   batch_size:     4096         # tokens per batch (paper trains on ~25k tokens/batch)
                                # set lower if VRAM is limited; trainer will accumulate
-  grad_accum_steps: 1          # increase to simulate larger batch on small GPU
+  grad_accum_steps: 4          # increase to simulate larger batch on small GPU
 
-  max_epochs:      2
-  max_steps:    100000         # hard stop regardless of epochs
+  max_epochs:      20
+  max_steps:    25000         # hard stop regardless of epochs
 
   # Mixed precision — "beyond the paper" speedup, harmless to faithfulness
   use_amp:        true         # torch.cuda.amp  (set false on CPU / MPS)
@@ -105,7 +105,7 @@ Training:
 Evaluation:
   beam_size:         4         # beam search width (paper Section 6)
   length_penalty:    0.6       # α in length normalisation (paper eq. after Table 2)
-  max_decode_steps:  200       # safety cap on generated length
+  max_decode_steps:  150       # safety cap on generated length
   bleu_tokenize: "13a"         # sacrebleu standard tokeniser
 
 # ---------------------------------------------------------------------------
