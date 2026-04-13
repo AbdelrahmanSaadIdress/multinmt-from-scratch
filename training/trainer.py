@@ -327,15 +327,19 @@ class Trainer:
         # Collect hypotheses and references grouped by language pair
         hyp_by_pair: Dict[str, list] = {}
         ref_by_pair: Dict[str, list] = {}
-
-        for batch in self.val_loader:
+        MAX_VAL_BATCHES = 200
+        for batch_idx, batch in enumerate(self.val_loader):
+            if batch_idx >= MAX_VAL_BATCHES:
+                break
+            if batch_idx % 20 == 0:
+                logger.info("  Validating batch %d/%d ...", batch_idx, MAX_VAL_BATCHES)
             src    = batch["src"].to(self.device)
             src_langs = batch["src_langs"]
             tgt_langs = batch["tgt_langs"]
             ref_texts = batch["tgt_texts"]
 
             src_mask = Transformer.make_src_mask(src, self.tokenizer.pad_id)
-
+            print("STTTTTTTTTTTTTTTTARRRRRRRRRT OOOOOFFFFFFFF GGGGGRRREDDDDY DEEEEEEEEECCCCCCCCODER")
             # Greedy decode (beam search used at final eval — see evaluation/)
             pred_ids = greedy_decode(
                 model=self.model,
@@ -346,13 +350,17 @@ class Trainer:
                 max_len=self.config["Evaluation"]["max_decode_steps"],
                 device=self.device,
             )
-
+            print("ENDDDDDDDDDDDDDDDDDDDD OOOOOFFFFFFFF GGGGGRRREDDDDY DEEEEEEEEECCCCCCCCODER")
+            
             for i, pred in enumerate(pred_ids):
                 pair_key = f"{src_langs[i]}-{tgt_langs[i]}"
                 hyp = self.tokenizer.decode(pred, skip_special_tokens=True)
                 ref = ref_texts[i]
                 hyp_by_pair.setdefault(pair_key, []).append(hyp)
                 ref_by_pair.setdefault(pair_key, []).append([ref])
+
+
+        print("==================================================================================================")
 
         bleu_scores: Dict[str, float] = {}
         for pair_key in hyp_by_pair:
@@ -458,6 +466,9 @@ class Trainer:
         elapsed   = time.time() - t0
         avg_loss  = epoch_loss / max(len(self.train_loader), 1)
         tok_per_s = epoch_tokens / elapsed
+        print(f"qqqqqqqqqqqqqqqqqqqqqqqqqqq{avg_loss}")
+        print(f"qqqqqqqqqqqqqqqqqqqqqqqqqqq{epoch_loss}")
+        print(f"qqqqqqqqqqqqqqqqqqqqqqqqqqq{len(self.train_loader)}")
 
         logger.info(
             "── Epoch %d done  avg_loss=%.4f  tokens/s=%.0f  time=%.1fs",
