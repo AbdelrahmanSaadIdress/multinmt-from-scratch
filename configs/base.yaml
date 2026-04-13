@@ -1,0 +1,128 @@
+# =============================================================================
+# configs/base.yaml
+# =============================================================================
+# Single source of truth for every hyperparameter in the project.
+# All modules import this via Hydra; nothing is hardcoded anywhere else.
+#
+# Paper reference: Vaswani et al., "Attention is All You Need" (2017)
+# Hyperparameters follow the "base model" configuration (Table 3, row 1).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+Data:
+  # OPUS corpus pairs to download (Helsinki-NLP on Hugging Face)
+  pairs:
+    - src: ar
+      tgt: en
+      opus_name: Helsinki-NLP/opus-100          # ~1M sentences
+    - src: en
+      tgt: fr
+      opus_name: Helsinki-NLP/opus-100          # ~1M sentences
+
+  raw_dir:       data/raw                        # downloaded raw text files
+  processed_dir: data/processed                  # binarized / tokenized splits
+  sp_model_path: data/spm/multinmt.model         # trained SentencePiece model
+
+  # SentencePiece training
+  vocab_size:     3200                           # shared BPE vocab across all langs
+  character_coverage: 0.9995                      # ~1.0 for Latin, 0.9995 covers Arabic
+  sp_model_type: bpe                              # byte-pair encoding (paper default)
+
+  # Language tags prepended to every source sentence (multilingual trick)
+  lang_tags:
+    - <en>
+    - <ar>
+    - <fr>
+
+  # Train/val/test split ratios
+  train_ratio: 0.8
+  val_ratio:   0.4
+  test_ratio:  0.4
+
+  max_seq_length: 150          # sentences longer than this are filtered out
+  min_seq_length:   3          # filter near-empty sentences
+
+  # Cap on examples per (language pair x split). null = load everything.
+  # Override at CLI: python main.py Data.max_examples=1000
+  max_examples: None
+
+# ---------------------------------------------------------------------------
+# Modelling  (paper Table 3, "base" column)
+# ---------------------------------------------------------------------------
+Modelling:
+  src_vocab_size: 32000        # must match Data.vocab_size after SP training
+  tgt_vocab_size: 32000        # shared vocab → same value
+  d_model:        512          # embedding / hidden dimension
+  num_heads:        8          # attention heads  (d_model / num_heads = 64 = d_k)
+  num_layers:       6          # encoder layers = decoder layers
+  d_ff:          2048          # position-wise FFN inner dimension (paper: 4 * d_model)
+  max_seq_length:  150         # must match Data.max_seq_length
+  dropout:         0.1         # applied to embeddings + sub-layer outputs (Section 5.4)
+
+# ---------------------------------------------------------------------------
+# Training  (paper Section 5.3 — Optimizer)
+# ---------------------------------------------------------------------------
+Training:
+  # Adam hyperparameters — paper equation 3
+  adam_beta1:    0.9
+  adam_beta2:    0.98
+  adam_eps:      1.0e-9
+
+  # Warmup LR schedule — paper equation 3
+  # lrate = d_model^{-0.5} · min(step^{-0.5}, step · warmup_steps^{-1.5})
+  warmup_steps:  4000
+
+  # Regularisation (Section 5.4)
+  label_smoothing: 0.1         # ε_ls = 0.1
+  gradient_clip:   1.0         # max_norm for torch.nn.utils.clip_grad_norm_
+
+  batch_size:     4096         # tokens per batch (paper trains on ~25k tokens/batch)
+                               # set lower if VRAM is limited; trainer will accumulate
+  grad_accum_steps: 1          # increase to simulate larger batch on small GPU
+
+  max_epochs:      2
+  max_steps:    100000         # hard stop regardless of epochs
+
+  # Mixed precision — "beyond the paper" speedup, harmless to faithfulness
+  use_amp:        true         # torch.cuda.amp  (set false on CPU / MPS)
+
+  # Checkpointing
+  checkpoint_dir:   checkpoints/
+  save_every_n_epochs:  1
+  keep_last_n_checkpoints: 3   # rolling window to save disk space
+  save_best_bleu:   true       # always keep the best-BLEU checkpoint
+
+  # Logging / eval cadence
+  log_every_n_steps:    100
+  eval_every_n_epochs:    1
+  seed:                  42
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+Evaluation:
+  beam_size:         4         # beam search width (paper Section 6)
+  length_penalty:    0.6       # α in length normalisation (paper eq. after Table 2)
+  max_decode_steps:  200       # safety cap on generated length
+  bleu_tokenize: "13a"         # sacrebleu standard tokeniser
+
+# ---------------------------------------------------------------------------
+# Experiment Tracking (wandb)
+# ---------------------------------------------------------------------------
+Wandb:
+  project:  multinmt-from-scratch
+  entity:   ""                 # set to your wandb username / team
+  log_attention_every_n_steps: 500
+  attention_sample_sentence: "The model learns to translate between languages."
+
+# ---------------------------------------------------------------------------
+# Demo (Gradio)
+# ---------------------------------------------------------------------------
+Demo:
+  title:       "MultiNMT — Multilingual Neural Machine Translation"
+  description: "English ↔ Arabic ↔ French using a faithful Transformer (Vaswani 2017)"
+  checkpoint:  checkpoints/best_bleu.pt
+  max_length:  200
+  share:       false           # set true to get a public Gradio link
