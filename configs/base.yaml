@@ -46,7 +46,7 @@ Data:
 
   # Cap on examples per (language pair x split). null = load everything.
   # Override at CLI: python main.py Data.max_examples=1000
-  max_examples: 1000         #100 000  #500 000    #1 000 000
+  max_examples: 200000         #100 000  #500 000    #1 000 000
 
 # ---------------------------------------------------------------------------
 # Modelling  (paper Table 3, "base" column)
@@ -78,7 +78,7 @@ Training:
   label_smoothing: 0.1         # ε_ls = 0.1
   gradient_clip:   1.0         # max_norm for torch.nn.utils.clip_grad_norm_
 
-  batch_size:     1024         # tokens per batch (paper trains on ~25k tokens/batch)
+  batch_size:     4096         # tokens per batch (paper trains on ~25k tokens/batch)
                                # set lower if VRAM is limited; trainer will accumulate
   grad_accum_steps: 4          # increase to simulate larger batch on small GPU
 
@@ -95,7 +95,7 @@ Training:
   save_best_bleu:   true       # always keep the best-BLEU checkpoint
 
   # Logging / eval cadence
-  log_every_n_steps:    10
+  log_every_n_steps:    100
   eval_every_n_epochs:    2
   seed:                  42
 
