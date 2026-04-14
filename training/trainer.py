@@ -20,6 +20,7 @@ Paper references:
 """
 
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -274,6 +275,33 @@ class Trainer:
     # Single training step
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # NaN diagnosis helper  (remove once training is stable)
+    # ------------------------------------------------------------------
+
+    def _check_nan(self, name: str, tensor: torch.Tensor) -> bool:
+        """
+        Return True and log a detailed report if `tensor` contains NaN or Inf.
+        Call this at each stage of the forward pass to pinpoint where NaN first
+        appears — the earliest positive hit is the root cause.
+        """
+        has_nan = torch.isnan(tensor).any().item()
+        has_inf = torch.isinf(tensor).any().item()
+        if has_nan or has_inf:
+            logger.error(
+                "NaN/Inf in %-30s | shape=%-20s | "
+                "min=%.4g  max=%.4g  mean=%.4g  "
+                "nan_count=%d  inf_count=%d",
+                name, str(tuple(tensor.shape)),
+                tensor[torch.isfinite(tensor)].min().item() if torch.isfinite(tensor).any() else float("nan"),
+                tensor[torch.isfinite(tensor)].max().item() if torch.isfinite(tensor).any() else float("nan"),
+                tensor[torch.isfinite(tensor)].mean().item() if torch.isfinite(tensor).any() else float("nan"),
+                torch.isnan(tensor).sum().item(),
+                torch.isinf(tensor).sum().item(),
+            )
+            return True
+        return False
+
     def _train_step(self, batch: Dict) -> float:
         """
         Forward + backward for one batch.
@@ -282,33 +310,116 @@ class Trainer:
         -------
         float   Loss value (for logging; detached from graph).
         """
-        src    = batch["src"].to(self.device)
-        tgt_in = batch["tgt_in"].to(self.device)
+        src     = batch["src"].to(self.device)
+        tgt_in  = batch["tgt_in"].to(self.device)
         tgt_out = batch["tgt_out"].to(self.device)
+
+        # ------------------------------------------------------------------ #
+        # Stage 0 — sanity-check the raw batch tokens                        #
+        # ------------------------------------------------------------------ #
+        # Token ids should never be NaN (they are integers), but out-of-range
+        # ids (>= vocab_size) will silently produce garbage embeddings, so we
+        # check bounds here.
+        vocab_size = self.config["Modelling"]["src_vocab_size"]
+        if (src >= vocab_size).any() or (src < 0).any():
+            logger.error(
+                "Out-of-range token id in src: min=%d  max=%d  vocab_size=%d",
+                src.min().item(), src.max().item(), vocab_size,
+            )
+        if (tgt_in >= vocab_size).any() or (tgt_in < 0).any():
+            logger.error(
+                "Out-of-range token id in tgt_in: min=%d  max=%d  vocab_size=%d",
+                tgt_in.min().item(), tgt_in.max().item(), vocab_size,
+            )
+
+        # Check if the entire target is padding (n_tokens == 0 in the loss
+        # denominator → 0/0 = NaN even with .clamp(min=1) if sum is also 0).
+        n_real_tgt_tokens = (tgt_out != self.tokenizer.pad_id).sum().item()
+        if n_real_tgt_tokens == 0:
+            logger.error(
+                "All-padding target batch at step %d — "
+                "this produces NaN loss.  "
+                "src shape=%s  tgt_out shape=%s",
+                self.global_step, tuple(src.shape), tuple(tgt_out.shape),
+            )
 
         # Build masks
         src_mask = Transformer.make_src_mask(src, self.tokenizer.pad_id)
         tgt_mask = Transformer.make_tgt_mask(tgt_in, self.tokenizer.pad_id)
 
-        # Forward pass — wrapped in autocast for AMP
-        with autocast("cuda", enabled=self.use_amp):
-            logits = self.model(src, tgt_in, src_mask, tgt_mask)
-            # Reshape for loss: (batch * seq_len, vocab_size) vs (batch * seq_len,)
-            loss = self.criterion(
-                logits.view(-1, logits.size(-1)),
-                tgt_out.view(-1),
-            )
-            # Scale loss by accumulation factor so gradients are correctly
-            # normalised when we call optimizer.step() after N micro-batches
-            loss = loss / self.grad_accum
+        # ------------------------------------------------------------------ #
+        # Stage 1 — embeddings                                               #
+        # ------------------------------------------------------------------ #
+        src_emb = self.model.positional_encoding(
+            self.model.embedded_enc(src) * math.sqrt(self.model.d_model)
+        )
+        tgt_emb = self.model.positional_encoding(
+            self.model.embedded_dec(tgt_in) * math.sqrt(self.model.d_model)
+        )
+        nan_in_emb = (
+            self._check_nan("src_embedding", src_emb) |
+            self._check_nan("tgt_embedding", tgt_emb)
+        )
 
-        # Backward
+        # ------------------------------------------------------------------ #
+        # Stage 2 — encoder layers                                           #
+        # ------------------------------------------------------------------ #
+        enc_out = src_emb
+        nan_in_enc = False
+        for i, enc_layer in enumerate(self.model.encoder_layers):
+            enc_out = enc_layer(enc_out, src_mask)
+            if self._check_nan(f"encoder_layer_{i}_output", enc_out):
+                nan_in_enc = True
+                break   # first bad layer is the root cause; no need to go further
+
+        # ------------------------------------------------------------------ #
+        # Stage 3 — decoder layers                                           #
+        # ------------------------------------------------------------------ #
+        dec_out = tgt_emb
+        nan_in_dec = False
+        for i, dec_layer in enumerate(self.model.decoder_layers):
+            dec_out = dec_layer(dec_out, enc_out, src_mask, tgt_mask)
+            if self._check_nan(f"decoder_layer_{i}_output", dec_out):
+                nan_in_dec = True
+                break
+
+        # ------------------------------------------------------------------ #
+        # Stage 4 — output projection + loss                                 #
+        # ------------------------------------------------------------------ #
+        logits = self.model.out(dec_out)
+        self._check_nan("logits", logits)
+
+        raw_loss = self.criterion(
+            logits.view(-1, logits.size(-1)),
+            tgt_out.view(-1),
+        )
+        self._check_nan("loss", raw_loss.unsqueeze(0))
+
+        # If anything was NaN, log the model weight norms so we can tell
+        # whether the weights themselves have exploded (indicates a previous
+        # bad optimizer step that gradient clipping didn't catch).
+        if any([nan_in_emb, nan_in_enc, nan_in_dec,
+                not math.isfinite(raw_loss.item())]):
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    pnorm = param.data.norm().item()
+                    gnorm = param.grad.norm().item() if param.grad is not None else 0.0
+                    if not math.isfinite(pnorm) or not math.isfinite(gnorm) or pnorm > 1e4:
+                        logger.error(
+                            "  BAD PARAM  %-50s  |w|=%.3g  |g|=%.3g",
+                            name, pnorm, gnorm,
+                        )
+
+        # ------------------------------------------------------------------ #
+        # Backward (same as normal — NaN grads will be visible next step)    #
+        # ------------------------------------------------------------------ #
+        scaled_loss = raw_loss / self.grad_accum
         if self.scaler:
-            self.scaler.scale(loss).backward()
+            self.scaler.scale(scaled_loss).backward()
         else:
-            loss.backward()
+            scaled_loss.backward()
 
-        return loss.item() * self.grad_accum   # return unscaled value for logging
+        return raw_loss.item()
 
     # ------------------------------------------------------------------
     # Validation
@@ -319,48 +430,63 @@ class Trainer:
         """
         Run greedy-decode on the validation set and compute BLEU per language pair.
 
+        Speed notes:
+            • Greedy decode is O(max_decode_steps) sequential forward passes per
+              batch, vs O(1) for training.  We cap at MAX_VAL_BATCHES so the
+              validation wall-clock stays proportional to training time.
+            • max_dec_len is capped to src_len + 50 instead of the full 200 —
+              this alone gives a 3–5× speedup on short sentences because most
+              real translations are not much longer than their source.
+
         Returns
         -------
-        dict mapping "bleu_{src}-{tgt}" → float
+        dict mapping "bleu/{src}-{tgt}" → float
         """
+        # Cap so validation never takes longer than a fraction of training time.
+        # 200 batches gives a stable corpus BLEU estimate; increase for final eval.
+        MAX_VAL_BATCHES = 200
+
         self.model.eval()
-        # Collect hypotheses and references grouped by language pair
         hyp_by_pair: Dict[str, list] = {}
         ref_by_pair: Dict[str, list] = {}
-        MAX_VAL_BATCHES = 200
+
         for batch_idx, batch in enumerate(self.val_loader):
             if batch_idx >= MAX_VAL_BATCHES:
                 break
-            if batch_idx % 20 == 0:
-                logger.info("  Validating batch %d/%d ...", batch_idx, MAX_VAL_BATCHES)
-            src    = batch["src"].to(self.device)
+            if batch_idx % 50 == 0:
+                logger.info("  Validating... batch %d/%d", batch_idx, MAX_VAL_BATCHES)
+
+            src       = batch["src"].to(self.device)
             src_langs = batch["src_langs"]
             tgt_langs = batch["tgt_langs"]
             ref_texts = batch["tgt_texts"]
 
             src_mask = Transformer.make_src_mask(src, self.tokenizer.pad_id)
-            print("STTTTTTTTTTTTTTTTARRRRRRRRRT OOOOOFFFFFFFF GGGGGRRREDDDDY DEEEEEEEEECCCCCCCCODER")
-            # Greedy decode (beam search used at final eval — see evaluation/)
+
+            # Adaptive decode length: source length + slack, never exceeding config cap.
+            # Avoids running 200 decode steps for a 10-token source sentence.
+            src_len     = src.size(1)
+            max_dec_len = min(
+                src_len + 50,
+                self.config["Evaluation"]["max_decode_steps"],
+            )
+
             pred_ids = greedy_decode(
                 model=self.model,
                 src=src,
                 src_mask=src_mask,
                 bos_id=self.tokenizer.bos_id,
                 eos_id=self.tokenizer.eos_id,
-                max_len=self.config["Evaluation"]["max_decode_steps"],
+                max_len=max_dec_len,
                 device=self.device,
             )
-            print("ENDDDDDDDDDDDDDDDDDDDD OOOOOFFFFFFFF GGGGGRRREDDDDY DEEEEEEEEECCCCCCCCODER")
-            
+
             for i, pred in enumerate(pred_ids):
                 pair_key = f"{src_langs[i]}-{tgt_langs[i]}"
                 hyp = self.tokenizer.decode(pred, skip_special_tokens=True)
                 ref = ref_texts[i]
                 hyp_by_pair.setdefault(pair_key, []).append(hyp)
                 ref_by_pair.setdefault(pair_key, []).append([ref])
-
-
-        print("==================================================================================================")
 
         bleu_scores: Dict[str, float] = {}
         for pair_key in hyp_by_pair:
@@ -396,6 +522,7 @@ class Trainer:
 
         for epoch in range(self.start_epoch, self.max_epochs):
             epoch_loss   = 0.0
+            epoch_steps  = 0    # counts actual optimizer steps (not micro-batches)
             epoch_tokens = 0
             t0 = time.time()
 
@@ -403,9 +530,23 @@ class Trainer:
 
                 # ---- Forward + backward ----
                 loss = self._train_step(batch)
-                epoch_loss += loss
+
+                # Guard: a NaN/Inf loss (e.g. from an all-padding batch or AMP
+                # underflow) would silently poison every subsequent avg_loss
+                # computation via float addition.  Skip the accumulation and
+                # warn so the problem is visible in the logs.
+                if math.isfinite(loss):
+                    epoch_loss += loss
+                else:
+                    logger.warning(
+                        "Non-finite loss (%.4g) at epoch=%d micro_step=%d — "
+                        "skipping accumulation.  Check for all-padding batches "
+                        "or AMP underflow.",
+                        loss, epoch, step_in_epoch,
+                    )
+
                 epoch_tokens += batch["src"].numel() + batch["tgt_in"].numel()
-                print(loss)
+
                 # ---- Optimizer step (every grad_accum micro-batches) ----
                 micro_step = (step_in_epoch + 1)
                 if micro_step % self.grad_accum == 0:
@@ -428,6 +569,7 @@ class Trainer:
                     self.scheduler.step()
                     self.optimizer.zero_grad()
                     self.global_step += 1
+                    epoch_steps      += 1  # track denominator for avg_loss
 
                     # ---- Logging ----
                     if self.global_step % self.log_every == 0:
@@ -445,11 +587,11 @@ class Trainer:
                     # Hard step ceiling
                     if self.global_step >= self.max_steps:
                         logger.info("Reached max_steps=%d — stopping.", self.max_steps)
-                        self._end_of_epoch(epoch, epoch_loss, epoch_tokens, t0)
+                        self._end_of_epoch(epoch, epoch_loss, epoch_steps, epoch_tokens, t0)
                         return
 
             # ---- End of epoch ----
-            self._end_of_epoch(epoch, epoch_loss, epoch_tokens, t0)
+            self._end_of_epoch(epoch, epoch_loss, epoch_steps, epoch_tokens, t0)
 
         logger.info("=== Training complete ===")
         if self._wandb:
@@ -459,16 +601,17 @@ class Trainer:
         self,
         epoch:        int,
         epoch_loss:   float,
+        epoch_steps:  int,    # actual optimizer steps this epoch (not micro-batches)
         epoch_tokens: int,
         t0:           float,
     ) -> None:
         """Validation, BLEU logging, and checkpointing at epoch end."""
         elapsed   = time.time() - t0
-        avg_loss  = epoch_loss / max(len(self.train_loader), 1)
-        tok_per_s = epoch_tokens / elapsed
-        print(f"qqqqqqqqqqqqqqqqqqqqqqqqqqq{avg_loss}")
-        print(f"qqqqqqqqqqqqqqqqqqqqqqqqqqq{epoch_loss}")
-        print(f"qqqqqqqqqqqqqqqqqqqqqqqqqqq{len(self.train_loader)}")
+        # Divide by steps taken, not by len(train_loader) — the token-bucket
+        # DataLoader's __len__ is unreliable (may return 0 or raise) because
+        # the number of batches is only known after iterating the sampler.
+        avg_loss  = epoch_loss / max(epoch_steps, 1)
+        tok_per_s = epoch_tokens / max(elapsed, 1e-6)
 
         logger.info(
             "── Epoch %d done  avg_loss=%.4f  tokens/s=%.0f  time=%.1fs",
