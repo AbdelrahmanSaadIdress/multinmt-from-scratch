@@ -37,7 +37,7 @@ Data:
     - <fr>
 
   # Train/val/test split ratios
-  train_ratio: 0.7
+  train_ratio: 0.97
   val_ratio:   0.2
   test_ratio:  0.1
 

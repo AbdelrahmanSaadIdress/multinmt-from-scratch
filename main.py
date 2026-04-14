@@ -179,7 +179,7 @@ def collect_raw_text_for_sp(
                 split="train",
                 cache_dir=str(raw_dir),
                 also_reverse=False,          # no need to duplicate for SP vocab
-                max_examples=max_examples_per_pair,
+                max_examples=1000000,
             )
         except Exception as exc:
             log.warning("Could not fetch %s–%s: %s", src_lang, tgt_lang, exc)

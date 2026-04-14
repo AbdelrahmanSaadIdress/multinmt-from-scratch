@@ -17,7 +17,7 @@ sacrebleu: https://github.com/mjpost/sacrebleu
 """
 
 import logging
-from typing import List
+from typing import List, Optional
 
 import sacrebleu
 from sacrebleu.metrics import BLEU
@@ -28,11 +28,18 @@ logger = logging.getLogger(__name__)
 # Use "intl" for Arabic/French if you want better handling of diacritics.
 _DEFAULT_TOKENIZE = "13a"
 
+_TOKENIZER_FOR_LANG = {
+    "en-ar": "intl",
+    "ar-en": "intl",
+    "en-fr": "13a",
+    "fr-en": "13a",
+}
 
 def compute_corpus_bleu(
     hypotheses:  List[str],
     references:  List[List[str]],
-    tokenize:    str = _DEFAULT_TOKENIZE,
+    lang_pair:   str = "en-fr",          # ← add this parameter
+    tokenize:    Optional[str] = None,
     lowercase:   bool = False,
 ) -> float:
     """
@@ -57,6 +64,10 @@ def compute_corpus_bleu(
     float
         BLEU score in [0, 100].
     """
+    if tokenize is None:
+        tokenize = _TOKENIZER_FOR_LANG.get(lang_pair, "13a")
+        logger.debug("Using sacrebleu tokenizer '%s' for pair '%s'", tokenize, lang_pair)
+    
     if not hypotheses:
         logger.warning("compute_corpus_bleu: empty hypotheses list — returning 0.0")
         return 0.0

@@ -484,13 +484,13 @@ class Trainer:
             for i, pred in enumerate(pred_ids):
                 pair_key = f"{src_langs[i]}-{tgt_langs[i]}"
                 hyp = self.tokenizer.decode(pred, skip_special_tokens=True)
+                hyp = hyp.strip()
                 ref = ref_texts[i]
                 hyp_by_pair.setdefault(pair_key, []).append(hyp)
                 ref_by_pair.setdefault(pair_key, []).append([ref])
-
         bleu_scores: Dict[str, float] = {}
         for pair_key in hyp_by_pair:
-            bleu = compute_corpus_bleu(hyp_by_pair[pair_key], ref_by_pair[pair_key])
+            bleu = compute_corpus_bleu(hyp_by_pair[pair_key], ref_by_pair[pair_key], pair_key)
             bleu_scores[f"bleu/{pair_key}"] = bleu
             logger.info("  [%s]  BLEU = %.2f", pair_key, bleu)
 
@@ -610,7 +610,7 @@ class Trainer:
         # Divide by steps taken, not by len(train_loader) — the token-bucket
         # DataLoader's __len__ is unreliable (may return 0 or raise) because
         # the number of batches is only known after iterating the sampler.
-        avg_loss  = epoch_loss / max(epoch_steps, 1)
+        avg_loss  = epoch_loss / max(len(self.train_loader), 1)
         tok_per_s = epoch_tokens / max(elapsed, 1e-6)
 
         logger.info(
