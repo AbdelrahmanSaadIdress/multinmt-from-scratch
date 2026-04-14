@@ -14,9 +14,9 @@
 Data:
   # OPUS corpus pairs to download (Helsinki-NLP on Hugging Face)
   pairs:
-    - src: ar
-      tgt: en
-      opus_name: Helsinki-NLP/opus-100          # ~1M sentences
+    # - src: ar
+    #   tgt: en
+    #   opus_name: Helsinki-NLP/opus-100          # ~1M sentences
     - src: en
       tgt: fr
       opus_name: Helsinki-NLP/opus-100          # ~1M sentences
